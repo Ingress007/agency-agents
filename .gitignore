@@ -80,6 +80,7 @@ integrations/kimi/*/
 !integrations/openclaw/README.md
 !integrations/kimi/README.md
 integrations/codex/agents/*
+integrations/pi/agents/*
 integrations/osaurus/agency-*/
 integrations/hermes/agency-agents-router/
 integrations/vibe/agents/
