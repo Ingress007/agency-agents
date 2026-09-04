@@ -283,6 +283,20 @@ install_file() {
 }
 
 # resolve_dest <tool> <default> — --path > $ENV_VAR > default.
+# path_collision_group <tool> — tools in the same group write identical
+# filenames into a shared --path and would overwrite each other; empty means
+# the tool's output is distinct and may share a path with anything. Derived by
+# installing one agent with every tool into a sandbox and comparing what
+# landed; re-measure if a converter's output naming changes.
+path_collision_group() {
+  case "$1" in
+    claude-code|copilot)             printf 'raw-source-md' ;;  # <division>-<slug>.md
+    gemini-cli|opencode|qwen|zcode)  printf 'slug-md' ;;        # <slug>.md
+    antigravity|osaurus)             printf 'agency-skill' ;;   # agency-<slug>/SKILL.md
+    *)                               printf '' ;;
+  esac
+}
+
 resolve_dest() {
   local tool="$1" def="$2" var=""
   [[ -n "$OVERRIDE_PATH" ]] && { printf '%s' "$OVERRIDE_PATH"; return; }
@@ -324,7 +338,11 @@ ensure_converted() {
   $AUTO_CONVERT || return 0
   case "$tool" in claude-code|copilot) return 0 ;; esac
   local d="$INTEGRATIONS/$tool"
-  if [[ ! -d "$d" ]] || [[ -z "$(find "$d" -type f 2>/dev/null | head -1)" ]]; then
+  # Every integrations/<tool>/ ships a committed README.md, so "any file
+  # present" mistook the README for generated output and never converted in a
+  # fresh checkout (the installer then hard-failed "<tool> missing"). Only files
+  # other than the README count as output.
+  if [[ ! -d "$d" ]] || [[ -z "$(find "$d" -type f ! -name 'README.md' 2>/dev/null | head -1)" ]]; then
     warn "$tool: integration files missing — running convert.sh --tool $tool"
     "$SCRIPT_DIR/convert.sh" --tool "$tool" >/dev/null 2>&1 \
       && ok "$tool: generated integration files" \
@@ -1258,6 +1276,23 @@ main() {
       $duplicate || _cleaned+=("$_t")
     done
     _tool_list=("${_cleaned[@]}")
+    # --path is one shared directory. Tools that write the same filenames into
+    # it silently overwrite each other; tools with distinct outputs coexist.
+    # Refuse only the colliding combinations (see path_collision_group).
+    if [[ -n "$OVERRIDE_PATH" && ${#_tool_list[@]} -gt 1 ]]; then
+      local _ta _tb _ga _gb
+      for _ta in "${_tool_list[@]}"; do
+        _ga="$(path_collision_group "$_ta")"; [[ -z "$_ga" ]] && continue
+        for _tb in "${_tool_list[@]}"; do
+          [[ "$_tb" == "$_ta" ]] && continue
+          _gb="$(path_collision_group "$_tb")"
+          if [[ "$_ga" == "$_gb" ]]; then
+            err "--path is one shared directory, and $_ta and $_tb write the same filenames into it — they would overwrite each other. Use one of them per --path (tools with distinct outputs may share one)."
+            exit 1
+          fi
+        done
+      done
+    fi
   fi
 
   # Decide whether to show interactive UI
