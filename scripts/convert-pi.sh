@@ -45,34 +45,32 @@ READ_ONLY_AGENTS="engineering-code-reviewer engineering-codebase-onboarding-engi
 # ---------------------------------------------------------------------------
 yaml_scalar() {
   local s="$1"
-  # Quote when the value contains YAML-special chars or leading/trailing space.
-  if printf '%s' "$s" | grep -qE '^[[:space:]]|[\`\"\\]|: |[#\[\]{}&*!|>%@\-,?]' ; then
-    local out="${s//\\/\\\\}"
-    out="${out//\"/\\\"}"
-    printf '"%s"' "$out"
-  else
-    printf '%s' "$s"
-  fi
+  # Always quote and escape backslashes / double quotes. Avoids brittle
+  # regex detection of YAML-special chars and remains valid single-line YAML.
+  local out="${s//\\/\\\\}"
+  out="${out//\"/\\\"}"
+  printf '"%s"' "$out"
 }
 
 # ---------------------------------------------------------------------------
 # Per-file conversion
 # ---------------------------------------------------------------------------
-# convert_file <src> <name> <display_name> <tools> <dest>
+# convert_file <src> <name> <display_name> <tools> <dest> [package]
 convert_file() {
-  local src="$1" name="$2" display="$3" tools="$4" dest="$5"
+  local src="$1" name="$2" display="$3" tools="$4" dest="$5" package="${6:-}"
   local desc body
   desc="$(get_field description "$src")"
   body="$(get_body "$src")"
   {
     echo "---"
     echo "name: $name"
+    [[ -n "$package" ]] && echo "package: $package"
     echo "description: $(yaml_scalar "$desc")"
     echo "aliases: $(yaml_scalar "$display")"
     echo "tools: $tools"
     echo "systemPromptMode: replace"
     echo "---"
-    echo "$body"
+    printf '%s\n' "$body"
   } > "$dest"
 }
 
@@ -116,13 +114,13 @@ fi
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-mkdir -p "$OUT_DIR"
+[[ $DRY -eq 1 ]] || mkdir -p "$OUT_DIR"
 total=0; skipped=0
 
 for div in "${DIVISIONS[@]}"; do
   dir="$REPO_ROOT/$div"
   [[ -d "$dir" ]] || { echo "  [skip] unknown division '$div'" >&2; continue; }
-  for file in $(find "$dir" -name "*.md" -type f 2>/dev/null); do
+  while IFS= read -r -d '' file; do
     [[ -f "$file" ]] || continue
     is_agent_file "$file" || { continue; }
     name="$(basename "$file" .md)"
@@ -142,24 +140,24 @@ for div in "${DIVISIONS[@]}"; do
       continue
     fi
 
-    convert_file "$file" "$name" "${display:-$name}" "$tools" "$OUT_DIR/$name.md"
-    # re-apply package line into the freshly written frontmatter
-    if [[ -n "$PACKAGE_LINE" ]]; then
-      sed -i.bak "3i\\
-$PACKAGE_LINE" "$OUT_DIR/$name.md"
-      rm -f "$OUT_DIR/$name.md.bak"
-    fi
+    convert_file "$file" "$name" "${display:-$name}" "$tools" "$OUT_DIR/$name.md" "$PACKAGE"
     total=$((total+1))
-  done
+  done < <(find "$dir" -name "*.md" -type f -print0 2>/dev/null)
 done
 
 echo ""
 echo "Converted $total agent(s) to $OUT_DIR${PACKAGE_LINE:+ (package: $PACKAGE)}${skipped:+ — skipped $skipped non-agent files}."
 
 if [[ $INSTALL -eq 1 && $DRY -eq 0 ]]; then
+  # Guard: do not run the main conversion when this script is sourced.
+  [[ "${BASH_SOURCE[0]:-}" == "${0}" ]] || { echo " sourced: skipping install" >&2; return 0; }
+
   target="${DEST:-$HOME/.pi/agent/agents}"
   mkdir -p "$target"
-  cp "$OUT_DIR"/*.md "$target"/ 2>/dev/null || true
+  if ! cp "$OUT_DIR"/*.md "$target"/; then
+    echo "Error: failed to install agents from $OUT_DIR to $target" >&2
+    exit 1
+  fi
   echo "Installed to $target — run: subagent({ action: \\"list\\" }) in Pi to verify."
 elif [[ $DRY -eq 1 && $INSTALL -eq 1 ]]; then
   echo "(--dry-run: nothing installed.)"
